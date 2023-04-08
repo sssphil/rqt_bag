@@ -31,7 +31,7 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 from python_qt_binding.QtWidgets import QVBoxLayout, QMenu, QWidget, QDockWidget
-
+from python_qt_binding.QtCore import QPoint
 
 class TopicPopupWidget(QWidget):
 
@@ -212,7 +212,7 @@ class TimelinePopupMenu(QMenu):
             self._publish_all = None
             self._publish_none = None
 
-        action = self.exec_(event.globalPos())
+        action = self.exec_(QPoint(event.pos().x(), event.pos().y()))
         if action is not None and action != 0:
             self.process(action)
 

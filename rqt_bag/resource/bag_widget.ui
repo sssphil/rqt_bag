@@ -281,6 +281,16 @@
       </widget>
      </item>
      <item>
+      <widget class="QPushButton" name="save_labels_button">
+       <property name="text">
+        <string>Save Labels</string>
+       </property>
+       <property name="checkable">
+        <bool>true</bool>
+       </property>
+      </widget>
+     </item>
+     <item>
       <spacer name="horizontalSpacer">
        <property name="orientation">
         <enum>Qt::Horizontal</enum>

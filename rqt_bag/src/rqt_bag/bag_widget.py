@@ -96,6 +96,7 @@ class BagWidget(QWidget):
         self.record_button.setIcon(QIcon.fromTheme('media-record'))
         self.load_button.setIcon(QIcon.fromTheme('document-open'))
         self.save_button.setIcon(QIcon.fromTheme('document-save'))
+        self.save_labels_button.setIcon(QIcon.fromTheme('document-save-as'))
 
         self.play_button.clicked[bool].connect(self._handle_play_clicked)
         self.thumbs_button.clicked[bool].connect(self._handle_thumbs_clicked)
@@ -111,10 +112,8 @@ class BagWidget(QWidget):
         self.record_button.clicked[bool].connect(self._handle_record_clicked)
         self.load_button.clicked[bool].connect(self._handle_load_clicked)
         self.save_button.clicked[bool].connect(self._handle_save_clicked)
-        self.graphics_view.mousePressEvent = self._timeline.on_mouse_down
-        self.graphics_view.mouseReleaseEvent = self._timeline.on_mouse_up
-        self.graphics_view.mouseMoveEvent = self._timeline.on_mouse_move
-        self.graphics_view.wheelEvent = self._timeline.on_mousewheel
+        self.save_labels_button.clicked[bool].connect(self._handle_save_labels_clicked)
+        self.graphics_view.mouseDoubleClickEvent = self._timeline.on_mouse_double_click
         self.closeEvent = self.handle_close
         self.keyPressEvent = self.on_key_press
         # TODO when the closeEvent is properly called by ROS_GUI implement that
@@ -134,6 +133,7 @@ class BagWidget(QWidget):
         self.begin_button.setEnabled(False)
         self.end_button.setEnabled(False)
         self.save_button.setEnabled(False)
+        self.save_labels_button.setEnabled(False)
 
         self._recording = False
 
@@ -307,6 +307,7 @@ class BagWidget(QWidget):
             self.end_button.setEnabled(True)
             self.save_button.setEnabled(True)
             self.record_button.setEnabled(False)
+            self.save_labels_button.setEnabled(True)
             self._timeline.add_bag(bag)
             qDebug("Done loading '%s'" % filename.encode(errors='replace'))
             # put the progress bar back the way it was
@@ -334,6 +335,18 @@ class BagWidget(QWidget):
 
             # Copy the highlighted region
             self._timeline.copy_region_to_bag(filename)
+
+    def _handle_save_labels_clicked(self):
+        proposed_filename = time.strftime('%Y-%m-%d-%H-%M-%S', time.localtime(time.time()))
+        filename = QFileDialog.getSaveFileName(
+            self, self.tr('Save labels...'), proposed_filename, self.tr('JSON files {.json} (*.json)'), options=QFileDialog.DontUseNativeDialog)[0]
+        if filename != '':
+            filename = filename.strip()
+            if not filename.endswith('.json'):
+                filename += '.json'
+                
+            # save labels to json
+            self._timeline._timeline_frame.save_labels(filename)
 
     def _set_status_text(self, text):
         if text:

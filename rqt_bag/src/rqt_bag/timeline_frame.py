@@ -34,14 +34,17 @@
 from python_qt_binding.QtCore import qDebug, QPointF, QRectF, Qt, qWarning, Signal
 from python_qt_binding.QtGui import QBrush, QCursor, QColor, QFont, \
     QFontMetrics, QPen, QPolygonF
-from python_qt_binding.QtWidgets import QGraphicsItem
+from python_qt_binding.QtWidgets import QGraphicsItem, QGraphicsRectItem, QInputDialog, QMessageBox
 import rospy
 
 import bisect
 import threading
+import json
 
 from .index_cache_thread import IndexCacheThread
 from .plugins.raw_view import RawView
+from .label_rect_item import LabelRectItem
+from .timeline_menu import TimelinePopupMenu
 
 
 class _SelectionMode(object):
@@ -117,6 +120,23 @@ class TimelineFrame(QGraphicsItem):
         self._minor_division_pen = QPen(QBrush(QColor(153, 153, 153, 128)), 0, Qt.DashLine)
         self._minor_division_tick_pen = QPen(QBrush(QColor(128, 128, 128, 128)), 0)
 
+        # label Rendering
+        self._label_font_height = None
+        self._label_name_sizes = None
+        # minimum pixels between end of label name and start of history
+        self._label_name_spacing = 3
+        self._label_font_size = 10.0
+        self._label_font = QFont("cairo")
+        self._label_font.setPointSize(self._label_font_size)
+        self._label_font.setBold(False)
+        self._label_vertical_padding = 4
+        # percentage of the horiz space that can be used for label display
+        self._label_name_max_percent = 25.0
+        self.label_rect_items = {}
+        self.label_regions = {}
+
+        self.message_regions = None
+
         # Topic Rendering
         self.topics = []
         self._topics_by_datatype = {}
@@ -190,6 +210,12 @@ class TimelineFrame(QGraphicsItem):
         self.index_cache = {}
         self.invalidated_caches = set()
         self._index_cache_thread = IndexCacheThread(self)
+
+        # move mouse events here to enable movable items
+        self.mousePressEvent = self.on_mouse_down
+        self.mouseReleaseEvent = self.on_mouse_up
+        self.mouseMoveEvent = self.on_mouse_move
+        self.wheelEvent = self.on_mousewheel
 
     # TODO the API interface should exist entirely at the bag_timeline level.
     #     Add a "get_draw_parameters()" at the bag_timeline level to access these
@@ -280,22 +306,23 @@ class TimelineFrame(QGraphicsItem):
 
     # QGraphicsItem implementation
     def boundingRect(self):
+        # set the bounding box to the whole scene for mouse events
         return QRectF(
             0, 0,
-            self._history_left + self._history_width + self._margin_right,
-            self._history_bottom + self._margin_bottom)
+            self.scene().views()[0].size().width(),
+            self.scene().views()[0].size().height())
 
     def paint(self, painter, option, widget):
         if self._start_stamp is None:
             return
 
         self._layout()
-        self._draw_topic_dividers(painter)
+        self._draw_timeline_dividers(painter)
         self._draw_selected_region(painter)
         self._draw_time_divisions(painter)
         self._draw_topic_histories(painter)
         self._draw_bag_ends(painter)
-        self._draw_topic_names(painter)
+        self._draw_label_names(painter)
         self._draw_history_border(painter)
         self._draw_playhead(painter)
     # END QGraphicsItem implementation
@@ -351,21 +378,22 @@ class TimelineFrame(QGraphicsItem):
         # Calculate history left and history width
         self._scene_width = self.scene().views()[0].size().width()
 
-        max_topic_name_width = -1
-        for topic in self.topics:
-            topic_width = self._qfont_width(self._trimmed_topic_name(topic))
-            if max_topic_name_width <= topic_width:
-                max_topic_name_width = topic_width
+        max_label_name_width = -1
+        for label in ["messages", *self.label_regions.keys()]:
+            label_width = self._qfont_width(label)
+            if max_label_name_width <= label_width:
+                max_label_name_width = label_width
 
-        # Calculate font height for each topic
-        self._topic_font_height = -1
-        for topic in self.topics:
-            topic_height = QFontMetrics(self._topic_font).height()
-            if self._topic_font_height <= topic_height:
-                self._topic_font_height = topic_height
+        # Calculate font height for each label
+        self._label_font_height = -1
+        for label in ["messages", *self.label_regions.keys()]:
+            label_height = QFontMetrics(self._label_font).height()
+            if self._label_font_height <= label_height:
+                self._label_font_height = label_height
+
 
         # Update the timeline boundries
-        new_history_left = self._margin_left + max_topic_name_width + self._topic_name_spacing
+        new_history_left = self._margin_left + max_label_name_width + self._label_name_spacing
         new_history_width = self._scene_width - new_history_left - self._margin_right
         self._history_left = new_history_left
         self._history_width = new_history_width
@@ -373,20 +401,14 @@ class TimelineFrame(QGraphicsItem):
         # Calculate the bounds for each topic
         self._history_bounds = {}
         y = self._history_top
-        for topic in self.topics:
-            datatype = self.scene().get_datatype(topic)
 
-            topic_height = None
-            if topic in self._rendered_topics:
-                renderer = self._timeline_renderers.get(datatype)
-                if renderer:
-                    topic_height = renderer.get_segment_height(topic)
-            if not topic_height:
-                topic_height = self._topic_font_height + self._topic_vertical_padding
+        for label in ["messages", *self.label_regions.keys()]:
+            label_height = None
+            label_height = self._label_font_height + self._label_vertical_padding
 
-            self._history_bounds[topic] = (self._history_left, y, self._history_width, topic_height)
+            self._history_bounds[label] = (self._history_left, y, self._history_width, label_height)
 
-            y += topic_height
+            y += label_height
 
         # new_history_bottom = max([y + h for (x, y, w, h) in self._history_bounds.values()]) - 1
         new_history_bottom = max([y + h for (_, y, _, h) in self._history_bounds.values()]) - 1
@@ -395,102 +417,134 @@ class TimelineFrame(QGraphicsItem):
 
     def _draw_topic_histories(self, painter):
         """
-        Draw all topic messages
-        :param painter: allows access to paint functions,''QPainter''
+        This is a modified function to draw all message ticks in the top row
         """
-        for topic in sorted(self._history_bounds.keys()):
-            self._draw_topic_history(painter, topic)
+        #SY reset test rect and redraw, may take more time than update?
+        if self.message_regions is None:
+            self.message_regions = []
+        else:
+            while len(self.message_regions) > 0:
+                item = self.message_regions.pop()
+                self.scene().removeItem(item)
 
-    def _draw_topic_history(self, painter, topic):
-        """
-        Draw boxes corrisponding to message regions on the timeline.
-        :param painter: allows access to paint functions,''QPainter''
-        :param topic: the topic for which message boxes should be drawn, ''str''
-        """
+        # SY let's draw everything in one row
+        _, y, _, h = self._history_bounds["messages"]
 
-        # x, y, w, h = self._history_bounds[topic]
-        _, y, _, h = self._history_bounds[topic]
-
-        msg_y = y + 2
+        msg_y = self._history_top
         msg_height = h - 2
 
-        datatype = self.scene().get_datatype(topic)
+        for topic in sorted(self.topics):
+            datatype = self.scene().get_datatype(topic)
 
-        # Get the renderer and the message combine interval
-        renderer = None
-        msg_combine_interval = None
-        if topic in self._rendered_topics:
-            renderer = self._timeline_renderers.get(datatype)
-            if not renderer is None:
-                msg_combine_interval = self.map_dx_to_dstamp(renderer.msg_combine_px)
-        if msg_combine_interval is None:
-            msg_combine_interval = self.map_dx_to_dstamp(self._default_msg_combine_px)
+            # Get the renderer and the message combine interval
+            renderer = None
+            msg_combine_interval = None
+            if topic in self._rendered_topics:
+                renderer = self._timeline_renderers.get(datatype)
+                if not renderer is None:
+                    msg_combine_interval = self.map_dx_to_dstamp(renderer.msg_combine_px)
+            if msg_combine_interval is None:
+                msg_combine_interval = self.map_dx_to_dstamp(self._default_msg_combine_px)
 
-        # Get the cache
-        if topic not in self.index_cache:
-            return
-        all_stamps = self.index_cache[topic]
+            # Get the cache
+            if topic not in self.index_cache:
+                return
+            all_stamps = self.index_cache[topic]
 
-        # start_index = bisect.bisect_left(all_stamps, self._stamp_left)
-        end_index = bisect.bisect_left(all_stamps, self._stamp_right)
-        # Set pen based on datatype
-        datatype_color = self._datatype_colors.get(datatype, self._default_datatype_color)
-        # Iterate through regions of connected messages
-        width_interval = self._history_width / (self._stamp_right - self._stamp_left)
-
-        # Draw stamps
-        for (stamp_start, stamp_end) in \
-                self._find_regions(
-                    all_stamps[:end_index],
-                    self.map_dx_to_dstamp(self._default_msg_combine_px)):
-            if stamp_end < self._stamp_left:
-                continue
-
-            region_x_start = self._history_left + (stamp_start - self._stamp_left) * width_interval
-            if region_x_start < self._history_left:
-                region_x_start = self._history_left  # Clip the region
-            region_x_end = self._history_left + (stamp_end - self._stamp_left) * width_interval
-            region_width = max(1, region_x_end - region_x_start)
-
-            painter.setBrush(QBrush(datatype_color))
-            painter.setPen(QPen(datatype_color, 1))
-            painter.drawRect(region_x_start, msg_y, region_width, msg_height)
-
-        # Draw active message
-        if topic in self.scene()._listeners:
-            curpen = painter.pen()
-            oldwidth = curpen.width()
-            curpen.setWidth(self._active_message_line_width)
-            painter.setPen(curpen)
-            playhead_stamp = None
-            playhead_index = bisect.bisect_right(all_stamps, self.playhead.to_sec()) - 1
-            if playhead_index >= 0:
-                playhead_stamp = all_stamps[playhead_index]
-                if playhead_stamp > self._stamp_left and playhead_stamp < self._stamp_right:
-                    playhead_x = self._history_left + \
-                        (all_stamps[playhead_index] - self._stamp_left) * width_interval
-                    painter.drawLine(playhead_x, msg_y, playhead_x, msg_y + msg_height)
-            curpen.setWidth(oldwidth)
-            painter.setPen(curpen)
-
-        # Custom renderer
-        if renderer:
+            # start_index = bisect.bisect_left(all_stamps, self._stamp_left)
+            end_index = bisect.bisect_left(all_stamps, self._stamp_right)
+            # Set pen based on datatype
+            datatype_color = self._datatype_colors.get(datatype, self._default_datatype_color)
             # Iterate through regions of connected messages
+            width_interval = self._history_width / (self._stamp_right - self._stamp_left)
+
+            # Draw stamps
             for (stamp_start, stamp_end) in \
-                    self._find_regions(all_stamps[:end_index], msg_combine_interval):
+                    self._find_regions(
+                        all_stamps[:end_index],
+                        self.map_dx_to_dstamp(self._default_msg_combine_px)):
                 if stamp_end < self._stamp_left:
                     continue
 
-                region_x_start = self._history_left + \
-                    (stamp_start - self._stamp_left) * width_interval
+                region_x_start = self._history_left + (stamp_start - self._stamp_left) * width_interval
+                if region_x_start < self._history_left:
+                    region_x_start = self._history_left  # Clip the region
                 region_x_end = self._history_left + (stamp_end - self._stamp_left) * width_interval
                 region_width = max(1, region_x_end - region_x_start)
-                renderer.draw_timeline_segment(
-                    painter, topic, stamp_start, stamp_end,
-                    region_x_start, msg_y, region_width, msg_height)
 
-        painter.setBrush(self._default_brush)
-        painter.setPen(self._default_pen)
+                painter.setBrush(QBrush(datatype_color))
+                painter.setPen(QPen(datatype_color, 1))
+                # painter.drawRect(region_x_start, msg_y, region_width, msg_height)   #SY the painter draws a rectangle, without returning its handle
+                self.message_regions.append(QGraphicsRectItem(QRectF(region_x_start, msg_y, region_width, msg_height), parent=self))
+
+
+            # Draw active message
+            if topic in self.scene()._listeners:
+                curpen = painter.pen()
+                oldwidth = curpen.width()
+                curpen.setWidth(self._active_message_line_width)
+                painter.setPen(curpen)
+                playhead_stamp = None
+                playhead_index = bisect.bisect_right(all_stamps, self.playhead.to_sec()) - 1
+                if playhead_index >= 0:
+                    playhead_stamp = all_stamps[playhead_index]
+                    if playhead_stamp > self._stamp_left and playhead_stamp < self._stamp_right:
+                        playhead_x = self._history_left + \
+                            (all_stamps[playhead_index] - self._stamp_left) * width_interval
+                        painter.drawLine(playhead_x, msg_y, playhead_x, msg_y + msg_height) #SY TODO will this be compactible in new gui
+                curpen.setWidth(oldwidth)
+                painter.setPen(curpen)
+
+            # Custom renderer
+            if renderer:
+                # Iterate through regions of connected messages
+                for (stamp_start, stamp_end) in \
+                        self._find_regions(all_stamps[:end_index], msg_combine_interval):
+                    if stamp_end < self._stamp_left:
+                        continue
+
+                    region_x_start = self._history_left + \
+                        (stamp_start - self._stamp_left) * width_interval
+                    region_x_end = self._history_left + (stamp_end - self._stamp_left) * width_interval
+                    region_width = max(1, region_x_end - region_x_start)
+                    renderer.draw_timeline_segment(
+                        painter, topic, stamp_start, stamp_end,
+                        region_x_start, msg_y, region_width, msg_height)
+
+            painter.setBrush(self._default_brush)
+            painter.setPen(self._default_pen)
+
+    def _redraw_label_regions(self,):
+        for label in self.label_regions.keys():
+            self._redraw_label_region(label)
+
+    def _redraw_label_region(self, label):
+        '''
+        update label region in paint()
+        the LabelRectItem should update in case of zooming,
+        use the item's stamp and duration info to calculate new position (left) and new duration (width)
+        '''
+        # x, y, w, h = self._history_bounds[topic]
+        _, y, _, h = self._history_bounds[label]
+
+        region_top = y + 2
+        region_height = h - 2
+
+        if label not in self.label_regions:
+            self.label_regions[label] = []
+
+        for region in self.label_regions[label]:
+            # stamp, duration = region.get_params()
+            # # left, top = region.pos()
+            #
+            # left = self.map_stamp_to_x(stamp, False)
+            # # region_top = y + 2
+            # width = self.map_dstamp_to_dx(duration)
+            # # region_height = h - 2
+            # # rect = QRectF(left, y, width, h)
+
+            # update region's pos().x() by stamp and rect().width() by duration
+            region.redraw()
 
     def _draw_bag_ends(self, painter):
         """
@@ -507,7 +561,7 @@ class TimelineFrame(QGraphicsItem):
         painter.setBrush(self._default_brush)
         painter.setPen(self._default_pen)
 
-    def _draw_topic_dividers(self, painter):
+    def _draw_timeline_dividers(self, painter):
         """
         Draws horizontal lines between each topic to visually separate the messages
         :param painter: allows access to paint functions,''QPainter''
@@ -516,8 +570,8 @@ class TimelineFrame(QGraphicsItem):
         clip_right = self._history_left + self._history_width
 
         row = 0
-        for topic in self.topics:
-            (x, y, w, h) = self._history_bounds[topic]
+        for key in self._history_bounds.keys():
+            (x, y, w, h) = self._history_bounds[key]
 
             if row % 2 == 0:
                 painter.setPen(Qt.lightGray)
@@ -611,16 +665,16 @@ class TimelineFrame(QGraphicsItem):
         painter.setBrush(self._default_brush)
         painter.setPen(self._default_pen)
 
-    def _draw_topic_names(self, painter):
+    def _draw_label_names(self, painter):
         """
         Calculate positions of existing topic names and draw them on the left, one for each row
         :param painter: ,''QPainter''
         """
-        topics = self._history_bounds.keys()
-        coords = [(self._margin_left, y + (h / 2) + (self._topic_font_height / 2))
+        labels = self._history_bounds.keys()
+        coords = [(self._margin_left, y + (h / 2) + (self._label_font_height / 2))
                   for (_, y, _, h) in self._history_bounds.values()]
 
-        for text, coords in zip([t.lstrip('/') for t in topics], coords):
+        for text, coords in zip([t for t in labels], coords):
             painter.setBrush(self._default_brush)
             painter.setPen(self._default_pen)
             painter.setFont(self._topic_font)
@@ -904,11 +958,11 @@ class TimelineFrame(QGraphicsItem):
         elif division >= 1:  # >1s divisions: show minutes:seconds
             return '%dm%02ds' % (mins, secs)
         elif division >= 0.1:  # >0.1s divisions: show seconds.0
-            return '%d.%ss' % (secs, str(int(10.0 * (elapsed - int(elapsed)))))
+            return '%d.%ss' % (secs, str(int(10.0 * round(elapsed - int(elapsed), 1))))
         elif division >= 0.01:  # >0.1s divisions: show seconds.0
-            return '%d.%02ds' % (secs, int(100.0 * (elapsed - int(elapsed))))
+            return '%d.%02ds' % (secs, int(100.0 * round(elapsed - int(elapsed), 2)))
         else:  # show seconds.00
-            return '%d.%03ds' % (secs, int(1000.0 * (elapsed - int(elapsed))))
+            return '%d.%03ds' % (secs, int(1000.0 * round(elapsed - int(elapsed), 3)))
 
     # Pixel location/time conversion functions
     def map_x_to_stamp(self, x, clamp_to_visible=True):
@@ -1001,6 +1055,9 @@ class TimelineFrame(QGraphicsItem):
             end_stamp = start_stamp + rospy.Duration.from_sec(5.0)
 
         self.set_timeline_view(start_stamp.to_sec(), end_stamp.to_sec())
+
+        self._redraw_label_regions()
+
         self.scene().update()
 
     def zoom_in(self):
@@ -1039,6 +1096,7 @@ class TimelineFrame(QGraphicsItem):
 
         self._stamp_left, self._stamp_right = interval
 
+        self._redraw_label_regions()
         self.scene().update()
 
     def get_zoom_interval(self, zoom, center=None):
@@ -1126,6 +1184,104 @@ class TimelineFrame(QGraphicsItem):
                 elif self._selecting_mode == _SelectionMode.SHIFTING:
                     self.scene().views()[0].setCursor(QCursor(Qt.ClosedHandCursor))
 
+    def on_left_double_click(self, event):
+        self._clicked_pos = self._dragged_pos = event.pos()
+
+        self.pause()
+
+        x = self._clicked_pos.x()
+        y = self._clicked_pos.y()
+
+        if self._history_top <= y <= self._history_bottom:
+            # clicked in timeline, see if we can add a label item
+            # determine which bound of label history is the click in
+            for label in self._history_bounds.keys():
+                (left, top, width, height) = self._history_bounds[label]
+                if x < left:
+                    if top < y < top + height:
+                        # clicked in this timeline's label
+                        text, ok = QInputDialog.getText(QInputDialog(),
+                                                        'Rename label',
+                                                        'Enter label name: ')
+                        text = text.strip()
+                        if ok and len(text) > 0:
+                            if text in self.label_regions:
+                                QMessageBox(
+                                    QMessageBox.Warning, 'Exclamation', f'Label {text} has already been added.').exec_()
+                            else:
+                                keys = list(self.label_regions.keys())
+                                values = self.label_regions.values()
+                                keys[keys.index(label)] = text
+                                self.label_regions = dict(zip(keys, values))
+
+                if left < x < left + width:
+                    if top < y < top + height:
+                        # clicked in this timeline
+                        if label != "messages":
+                            # not clicked in message row
+                            if event.modifiers() == Qt.ShiftModifier:
+                                # shift is pressed, we try to delete regions
+                                # iterate through all regions and see if the clicked position is in it
+                                for region in self.label_regions[label]:
+                                    pos = region.pos()
+                                    rect = region.rect()
+                                    left = pos.x()
+                                    right = left + rect.width()
+                                    top = pos.y()
+                                    bottom = top + rect.height()
+
+                                    if left < x < right:
+                                        if top < y < bottom:
+                                            # remove the label item
+                                            self.scene().removeItem(region)
+                                            self.label_regions[label].remove(region)
+
+                            else:
+                                # add another region at the clicked position
+                                stamp = self.map_x_to_stamp(x, False)
+                                default_duration = 1/10.  # second
+                                label_width = self.map_dstamp_to_dx(default_duration)
+                                label_height = self._label_font_height + self._label_vertical_padding
+
+                                self.label_regions[label].append(LabelRectItem(stamp, default_duration, QRectF(x, top, label_width, label_height), parent=self))
+
+        elif y > self._history_bottom:
+            # Clicked below timeline - add new labels
+            text, ok = QInputDialog.getText(QInputDialog(),
+                                            'New label',
+                                            'Enter label name: ')
+            text.strip()
+            if ok and len(text) > 0:
+                if text in self.label_regions:
+                    QMessageBox(
+                        QMessageBox.Warning, 'Exclamation', f'Label {text} has already been added.').exec_()
+                else:
+                    # add new label and initial label region (stamp, duration)
+                    self.label_regions[text] = []
+                    stamp = self.playhead.to_sec()
+                    label_x = self.map_stamp_to_x(stamp, False)
+                    label_y = self._history_bottom
+                    default_duration = 1/10. # second
+                    label_width = self.map_dstamp_to_dx(default_duration)
+                    label_height = self._label_font_height + self._label_vertical_padding
+
+                    self.label_regions[text].append(LabelRectItem(stamp, default_duration, QRectF(label_x, label_y, label_width, label_height), parent=self))
+
+        self.scene().update()
+        self.resume()
+
+    def on_mouse_down(self, event):
+        if event.buttons() == Qt.LeftButton:
+            self.on_left_down(event)
+        elif event.buttons() == Qt.MidButton:
+            self.on_middle_down(event)
+        elif event.buttons() == Qt.RightButton:
+            if self._history_top <= event.pos().y() <= self._history_bottom:
+                # don't show the menu if it clicked on the timeline
+                return
+            topic = self.map_y_to_topic(self._bag_timeline.views()[0].mapToScene(event.pos().x(), event.pos().y()).y())
+            TimelinePopupMenu(self._bag_timeline, event, topic)
+
     def on_mouse_up(self, event):
         self.resume()
 
@@ -1198,6 +1354,7 @@ class TimelineFrame(QGraphicsItem):
                     self.zoom_timeline(zoom, self.map_x_to_stamp(x))
 
                 self.scene().views()[0].setCursor(QCursor(Qt.ClosedHandCursor))
+                self._redraw_label_regions()
             elif event.buttons() == Qt.LeftButton:
                 # Left: move selected region and move selected region boundry
                 clicked_x = self._clicked_pos.x()
@@ -1245,3 +1402,13 @@ class TimelineFrame(QGraphicsItem):
                         self.playhead = rospy.Time.from_sec(x_stamp)
                     self.scene().update()
             self._dragged_pos = event.pos()
+
+    def save_labels(self, filename):
+        with open(filename, 'w') as f:
+            j = {"start_stamp": self._start_stamp.to_sec(), "end_stamp": self._end_stamp.to_sec()}
+            for label in self.label_regions.keys():
+                j[label] = []
+                for region in self.label_regions[label]:
+                    stamp, duration = region.get_params()
+                    j[label].append({"start": stamp, "end": stamp + duration})
+            f.write(json.dumps(j))

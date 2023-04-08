@@ -499,6 +499,10 @@ class BagTimeline(QGraphicsScene):
             return bag._read_message(position)
 
     # Mouse events
+    def on_mouse_double_click(self, event):
+        if event.buttons() == Qt.LeftButton:
+            self._timeline_frame.on_left_double_click(event)
+
     def on_mouse_down(self, event):
         if event.buttons() == Qt.LeftButton:
             self._timeline_frame.on_left_down(event)

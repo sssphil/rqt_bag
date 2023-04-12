@@ -1403,12 +1403,71 @@ class TimelineFrame(QGraphicsItem):
                     self.scene().update()
             self._dragged_pos = event.pos()
 
-    def save_labels(self, filename):
+    def save_annotations(self, filename):
         with open(filename, 'w') as f:
-            j = {"start_stamp": self._start_stamp.to_sec(), "end_stamp": self._end_stamp.to_sec()}
+            j = {"start_stamp": self._start_stamp.to_sec(), "end_stamp": self._end_stamp.to_sec(), "annotations": {}}
+
             for label in self.label_regions.keys():
-                j[label] = []
+                j["annotations"][label] = []
                 for region in self.label_regions[label]:
                     stamp, duration = region.get_params()
-                    j[label].append({"start": stamp, "end": stamp + duration})
+                    j["annotations"][label].append({"start": stamp, "end": stamp + duration})
             f.write(json.dumps(j))
+
+    def load_annotations(self, filename):
+        try:
+            f = open(filename)
+            node = json.load(f)
+        except Exception as e:
+            QMessageBox(
+                QMessageBox.Warning, 'Exclamation', f'Failed to open JSON file {filename}: {e}').exec_()
+            return
+
+        if "annotations" not in node:
+            QMessageBox(
+                QMessageBox.Warning, 'Exclamation', f'Did not find annotations in JSON file {filename}').exec_()
+            return
+
+        labels = node["annotations"]
+        for label in labels.keys():
+            # check if self.label_regions contain this label, if not insert it
+            if label not in self.label_regions:
+                self.label_regions[label] = []
+
+        #update history_bounds
+        self._layout()
+
+        min_start = None
+        max_end = None
+        for label in labels.keys():
+            (_, y, _, _) = self._history_bounds[label]
+
+            # create label regions and add to self.label_regions
+            for region in labels[label]:
+                try:
+                    start = region["start"]
+                    end = region["end"]
+
+                    if min_start is None or min_start > start:
+                        min_start = start
+
+                    if max_end is None or max_end < end:
+                        max_end = end
+
+                    duration = end - start
+                    label_width = self.map_dstamp_to_dx(duration)
+                    label_height = self._label_font_height + self._label_vertical_padding
+                    # add label items without giving details on positions
+                    self.label_regions[label].append(LabelRectItem(start, duration, QRectF(0, y, label_width, label_height), parent=self))
+                except Exception as e:
+                    QMessageBox(
+                        QMessageBox.Warning, 'Exclamation', f'Failed to create label by {region} ').exec_()
+
+        if min_start > self._end_stamp.to_sec() or max_end < self._start_stamp.to_sec():
+            QMessageBox(
+                QMessageBox.Warning, 'Exclamation', f'Annotations do not match the opened bags. Bags\' stamps from '
+                                                    f'{self._start_stamp.to_sec()} to {self._end_stamp.to_sec()}. '
+                                                    f'Annotations\' stamps from {min_start} to {max_end} ').exec_()
+
+        # refresh timeline
+        self.reset_zoom()

@@ -281,9 +281,19 @@
       </widget>
      </item>
      <item>
-      <widget class="QPushButton" name="save_labels_button">
+      <widget class="QPushButton" name="save_annotations_button">
        <property name="text">
-        <string>Save Labels</string>
+        <string>Save Annotations</string>
+       </property>
+       <property name="checkable">
+        <bool>true</bool>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="load_annotations_button">
+       <property name="text">
+        <string>Load Annotations</string>
        </property>
        <property name="checkable">
         <bool>true</bool>

@@ -23,7 +23,7 @@ class LabelRectItem(QGraphicsRectItem):
                 value.setY(pos.y())
                 # resize callback
                 if self.change_callback:
-                    self.change_callback(value.x())
+                    self.change_callback(value)
             elif change == QGraphicsItem.ItemPositionHasChanged:
                 pass
             return value
@@ -81,9 +81,12 @@ class LabelRectItem(QGraphicsRectItem):
             painter.setBrush(self._default_brush)
             painter.setPen(self._default_pen)
 
+        def change_callback(value):
+            self.update_label()
+
         # initialize with only handle_width, height will be updated later
-        self.left_handle = LabelRectItem.HandleItem(draw_left_handle, self.update_label, QRectF(-self.handle_width, -self.handle_width/2,self.handle_width,self.handle_width), parent=self)
-        self.right_handle = LabelRectItem.HandleItem(draw_right_handle, self.update_label, QRectF(0, -self.handle_width/2,self.handle_width,self.handle_width), parent=self)
+        self.left_handle = LabelRectItem.HandleItem(draw_left_handle, change_callback, QRectF(-self.handle_width, -self.handle_width/2,self.handle_width,self.handle_width), parent=self)
+        self.right_handle = LabelRectItem.HandleItem(draw_right_handle, change_callback, QRectF(0, -self.handle_width/2,self.handle_width,self.handle_width), parent=self)
         self.update_handle()
 
         self.setFlag(QGraphicsItem.ItemIsMovable, True)

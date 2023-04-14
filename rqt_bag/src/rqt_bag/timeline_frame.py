@@ -419,14 +419,6 @@ class TimelineFrame(QGraphicsItem):
         """
         This is a modified function to draw all message ticks in the top row
         """
-        #SY reset test rect and redraw, may take more time than update?
-        if self.message_regions is None:
-            self.message_regions = []
-        else:
-            while len(self.message_regions) > 0:
-                item = self.message_regions.pop()
-                self.scene().removeItem(item)
-
         # SY let's draw everything in one row
         _, y, _, h = self._history_bounds["messages"]
 
@@ -474,9 +466,7 @@ class TimelineFrame(QGraphicsItem):
 
                 painter.setBrush(QBrush(datatype_color))
                 painter.setPen(QPen(datatype_color, 1))
-                # painter.drawRect(region_x_start, msg_y, region_width, msg_height)   #SY the painter draws a rectangle, without returning its handle
-                self.message_regions.append(QGraphicsRectItem(QRectF(region_x_start, msg_y, region_width, msg_height), parent=self))
-
+                painter.drawRect(region_x_start, msg_y, region_width, msg_height)
 
             # Draw active message
             if topic in self.scene()._listeners:
@@ -491,7 +481,7 @@ class TimelineFrame(QGraphicsItem):
                     if playhead_stamp > self._stamp_left and playhead_stamp < self._stamp_right:
                         playhead_x = self._history_left + \
                             (all_stamps[playhead_index] - self._stamp_left) * width_interval
-                        painter.drawLine(playhead_x, msg_y, playhead_x, msg_y + msg_height) #SY TODO will this be compactible in new gui
+                        painter.drawLine(playhead_x, msg_y, playhead_x, msg_y + msg_height)
                 curpen.setWidth(oldwidth)
                 painter.setPen(curpen)
 
@@ -1037,6 +1027,7 @@ class TimelineFrame(QGraphicsItem):
 
     def translate_timeline(self, dstamp):
         self.set_timeline_view(self._stamp_left + dstamp, self._stamp_right + dstamp)
+        self._redraw_label_regions()
         self.scene().update()
 
     def translate_timeline_left(self):

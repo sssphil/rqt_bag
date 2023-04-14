@@ -82,8 +82,8 @@ class LabelRectItem(QGraphicsRectItem):
             painter.setPen(self._default_pen)
 
         # initialize with only handle_width, height will be updated later
-        self.left_handle = LabelRectItem.HandleItem(draw_left_handle, self.set_left, QRectF(-self.handle_width, -self.handle_width/2,self.handle_width,self.handle_width), parent=self)
-        self.right_handle = LabelRectItem.HandleItem(draw_right_handle, self.set_right, QRectF(0, -self.handle_width/2,self.handle_width,self.handle_width), parent=self)
+        self.left_handle = LabelRectItem.HandleItem(draw_left_handle, self.update_label, QRectF(-self.handle_width, -self.handle_width/2,self.handle_width,self.handle_width), parent=self)
+        self.right_handle = LabelRectItem.HandleItem(draw_right_handle, self.update_label, QRectF(0, -self.handle_width/2,self.handle_width,self.handle_width), parent=self)
         self.update_handle()
 
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
@@ -91,24 +91,6 @@ class LabelRectItem(QGraphicsRectItem):
 
     def get_params(self):
         return self.stamp, self.duration
-
-    def set_left(self, x):
-        pos = self.left_handle.pos()
-
-        # left > right
-        if x > self.right_handle.pos().x():
-            # left reaches over right, move both
-            self.right_handle.setPos(x, pos.y())
-
-        self.update_label()
-
-    def set_right(self, x):
-        pos = self.right_handle.pos()
-        if self.left_handle.pos().x() > x:
-            # right reaches over left, move both
-            self.right_handle.setPos(x, pos.y())
-
-        self.update_label()
 
     def paint(self, painter, option, widget):
         painter.setPen(QPen(self.rect_color))
@@ -147,6 +129,7 @@ class LabelRectItem(QGraphicsRectItem):
         rect = self.rect()
         width = self.parentItem().map_dstamp_to_dx(self.duration)
         rect.setWidth(width)
+        rect.setLeft(0)
         self.setRect(rect)
 
         # update handle
@@ -159,6 +142,10 @@ class LabelRectItem(QGraphicsRectItem):
         left = self.left_handle.pos().x()
         width = self.right_handle.pos().x() - self.left_handle.pos().x()
 
+        if width <= 0:
+            left = self.right_handle.pos().x()
+            width = -width
+
         rect = self.rect()
         rect.setLeft(left)
         rect.setWidth(width)
@@ -167,6 +154,8 @@ class LabelRectItem(QGraphicsRectItem):
         self.stamp = self.parentItem().map_x_to_stamp(left + self.pos().x())
         self.duration = self.parentItem().map_dx_to_dstamp(width)
 
+        self.update_handle()
+
     # reposition handles
     def update_handle(self):
 
@@ -174,14 +163,7 @@ class LabelRectItem(QGraphicsRectItem):
         self.left_handle.setFlag(QGraphicsItem.ItemSendsGeometryChanges, False)
         self.right_handle.setFlag(QGraphicsItem.ItemSendsGeometryChanges, False)
 
-        pos = self.pos()
-        pos.setX(self.parentItem().map_stamp_to_x(self.stamp, False))
         rect = self.rect()
-        rect.setLeft(0)
-        rect.setWidth(self.parentItem().map_dstamp_to_dx(self.duration))
-
-        self.setPos(pos)
-        self.setRect(rect)
 
         # positions are set to the midpoint of the rect's left/right edges
         self.left_handle.setPos(QPointF(rect.left(), rect.top() + rect.height()/2))

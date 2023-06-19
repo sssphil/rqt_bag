@@ -154,7 +154,7 @@ class LabelRectItem(QGraphicsRectItem):
         rect.setWidth(width)
         self.setRect(rect)
 
-        self.stamp = self.parentItem().map_x_to_stamp(left + self.pos().x())
+        self.stamp = self.parentItem().map_x_to_stamp(left + self.pos().x(), False)
         self.duration = self.parentItem().map_dx_to_dstamp(width)
 
         self.update_handle()
